@@ -33,10 +33,12 @@ scheduler.start()
 
 # Twilio configuration
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
-TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
+TWILIO_API_KEY = os.getenv('TWILIO_API_KEY')
+TWILIO_API_SECRET = os.getenv('TWILIO_API_SECRET')
 TWILIO_WHATSAPP_NUMBER = os.getenv('TWILIO_WHATSAPP_NUMBER', 'whatsapp:+14155238886')
 
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+# Use API Key authentication instead of Auth Token
+twilio_client = Client(TWILIO_API_KEY, TWILIO_API_SECRET, account_sid=TWILIO_ACCOUNT_SID)
 
 # In-memory storage for MVP (replace with database later)
 users = {}
