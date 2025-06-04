@@ -286,6 +286,29 @@ What would you like help with?"""
         elif 'remind' in msg_lower:
             return self.handle_reminder(message)
 
+        # Quick confirmations for ongoing tasks
+        elif msg_lower in ['yes', 'yeah', 'sure', 'ok', 'set it as a goal', 'make it a goal']:
+            # Check if there was a recent reminder with an ongoing task
+            conn = sqlite3.connect('assistant.db')
+            c = conn.cursor()
+            c.execute("""SELECT task FROM reminders 
+                        WHERE phone_number = ? 
+                        ORDER BY created_at DESC LIMIT 1""",
+                     (self.phone_number,))
+            recent = c.fetchone()
+            conn.close()
+            
+            if recent:
+                task = recent[0]
+                ongoing_keywords = ['essay', 'report', 'project', 'assignment', 'homework', 'study', 'work on', 'write', 'finish', 'complete']
+                if any(keyword in task.lower() for keyword in ongoing_keywords):
+                    # Convert to a goal
+                    goal_text = task.replace('you need to', '').replace('your', 'my').strip()
+                    goal_text = goal_text[0].upper() + goal_text[1:] if goal_text else task
+                    return self.handle_goal(f"I want to {goal_text}")
+            
+            return "What would you like to set as a goal? Just tell me what you want to accomplish!"
+
         # Goals
         elif any(phrase in msg_lower for phrase in ['i want to', 'i need to', 'my goal', 'i have to', 'i must']):
             return self.handle_goal(message)
@@ -340,14 +363,27 @@ What would you like help with?"""
             time_str = reminder_time.strftime('%I:%M %p')
             date_str = "today" if reminder_time.date() == datetime.now(self.timezone).date() else reminder_time.strftime('%B %d')
             
-            return f"""✅ Reminder set!
+            response = f"""✅ Reminder set!
 
 📌 Task: {task}
 ⏰ Time: {time_str} {date_str}
 
-I'll message you then! 
+I'll message you then!"""
+            
+            # Check if this is an ongoing task that needs follow-ups
+            ongoing_keywords = ['essay', 'report', 'project', 'assignment', 'homework', 'study', 'work on', 'write', 'finish', 'complete']
+            if any(keyword in task.lower() for keyword in ongoing_keywords):
+                response += f"""
 
-💡 Tip: Say "show my reminders" to see all pending reminders."""
+I noticed this might be an ongoing task. Would you like me to:
+• Set up regular check-ins to help you stay on track?
+• Create a goal to track your progress?
+
+Just say "yes" or "set it as a goal" and I'll help you stay accountable! 💪"""
+            else:
+                response += "\n\n💡 Tip: Say \"show my reminders\" to see all pending reminders."
+            
+            return response
         else:
             return """I need more details to set a reminder. Try:
 • "Remind me to call mom at 5 PM"
@@ -406,29 +442,34 @@ What would you like me to remind you about?"""
             
             # Remove the time pattern we found
             if relative_match:
-                # For "in X minutes/hours to" pattern, keep the "to" part
-                pattern = relative_match.group(0)
-                if ' to ' in text_lower:
-                    task = task.replace(pattern + ' to', '')
+                # For "in X minutes/hours that" pattern, keep everything after "that"
+                if ' that ' in text_lower:
+                    that_index = text_lower.find(' that ')
+                    task = text[that_index + 6:]  # Skip " that "
                 else:
-                    task = task.replace(pattern, '')
+                    task = task.replace(relative_match.group(0), '')
             
             if time_match:
                 task = task.replace(time_match.group(0), '')
                 task = re.sub(r'\bat\b', '', task, flags=re.IGNORECASE)
             
             # Remove other time-related words
-            task = re.sub(r'\b(tomorrow|today)\b', '', task, flags=re.IGNORECASE)
+            task = re.sub(r'\b(tomorrow|today|to)\b', '', task, flags=re.IGNORECASE)
             
             # Clean up
             task = ' '.join(task.split()).strip()
             
-            # Remove leading "to" if present
-            if task.startswith('to '):
-                task = task[3:]
+            # Fix pronouns - convert "I" to "you" and "my" to "your"
+            task = re.sub(r'\bI\b', 'you', task)
+            task = re.sub(r'\bmy\b', 'your', task, flags=re.IGNORECASE)
+            task = re.sub(r'\bme\b', 'you', task, flags=re.IGNORECASE)
+            
+            # Ensure first letter is lowercase unless it's a proper noun
+            if task and not task[0].isupper() or task.startswith('You'):
+                task = task[0].lower() + task[1:] if len(task) > 1 else task.lower()
             
             if not task:
-                task = "Reminder"
+                task = "your reminder"
             
             return reminder_time, task
         
