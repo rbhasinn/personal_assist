@@ -1,0 +1,3 @@
+# Paste the code above, save with Ctrl+O, Enter, Ctrl+X # Stop your 
+current bot (Ctrl+C) # Run the new one
+python mvp_bot.py

@@ -1,0 +1,41 @@
+# Core dependencies
+Flask==2.3.3
+gunicorn==21.2.0
+python-dotenv==1.0.0
+
+# Twilio for WhatsApp and Voice
+twilio==8.5.0
+
+# Google services
+google-auth==2.22.0
+google-auth-oauthlib==1.0.0
+google-auth-httplib2==0.1.0
+google-api-python-client==2.95.0
+
+# Translation
+googletrans==4.0.0-rc1
+
+# Speech recognition for voice notes
+SpeechRecognition==3.10.0
+pydub==0.25.1
+
+# Date parsing
+python-dateutil==2.8.2
+
+# Scheduling
+APScheduler==3.10.4
+
+# Database
+redis==4.6.0
+
+# Timezone support
+pytz==2023.3
+
+# Logging
+python-json-logger==2.0.7
+
+# HTTP requests
+requests==2.31.0
+
+# Production server
+gevent==23.7.0
