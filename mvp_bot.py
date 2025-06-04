@@ -139,7 +139,7 @@ class PersonalAssistant:
             user = {
                 'phone_number': user[0],
                 'name': user[1],
-                'assistant_name': user[2],
+                'assistant_name': user[2] or 'Assistant',
                 'timezone': user[3],
                 'preferences': json.loads(user[4]) if user[4] else {}
             }
@@ -240,11 +240,11 @@ class PersonalAssistant:
     
     def process_with_patterns(self, message: str) -> str:
         """Smart pattern matching without AI"""
-        msg_lower = message.lower()
+        msg_lower = message.lower().strip()
         current_time = datetime.now(self.timezone)
         
-        # Greeting
-        if any(word in msg_lower.split() for word in ['hi', 'hello', 'hey', 'start', 'help']):
+        # Greeting or help
+        if any(word in msg_lower for word in ['hi', 'hello', 'hey', 'start', 'help']):
             return f"""👋 Hi! I'm {self.user['assistant_name']}, your personal assistant!
 
 I can help you:
@@ -253,20 +253,36 @@ I can help you:
 🍳 Find recipes - "Show me a pasta recipe"  
 ⏰ Manage your time - "What should I do now?"
 📝 Stay organized - "My tasks for today are..."
+✏️ Name me - "I'll call you Jarvis"
 
 Your timezone: {self.user['timezone']} ({current_time.strftime('%I:%M %p')})
 
 What would you like help with?"""
 
         # Set assistant name
-        elif 'your name is' in msg_lower or 'call you' in msg_lower:
-            match = re.search(r'(?:your name is|call you)\s+(\w+)', msg_lower)
-            if match:
-                new_name = match.group(1).capitalize()
-                self.update_assistant_name(new_name)
-                return f"Great! I'm {new_name} now. How can I help you today? 😊"
+        elif any(phrase in msg_lower for phrase in ["i'll call you", "your name is", "call you", "name you"]):
+            # Extract name more intelligently
+            patterns = [
+                r"i'll call you\s+(\w+)",
+                r"your name is\s+(\w+)",
+                r"call you\s+(\w+)",
+                r"name you\s+(\w+)"
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, msg_lower)
+                if match:
+                    new_name = match.group(1).capitalize()
+                    self.update_assistant_name(new_name)
+                    return f"Great! I'm {new_name} now. How can I help you today? 😊"
+            
+            return "What would you like to call me? Just say 'I'll call you [name]'"
 
-        # Reminders
+        # Show reminders/status - check this BEFORE reminder handling
+        elif any(phrase in msg_lower for phrase in ['show my reminders', 'my reminders', 'show reminders', 'show status', 'my tasks', 'what do i have', 'whats pending', 'pending']):
+            return self.get_status()
+
+        # Reminders - check AFTER status commands
         elif 'remind' in msg_lower:
             return self.handle_reminder(message)
 
@@ -290,10 +306,6 @@ What would you like help with?"""
         elif any(phrase in msg_lower for phrase in ['good morning', 'morning routine', 'start my day']):
             return self.morning_routine()
 
-        # Status check
-        elif 'status' in msg_lower or 'pending' in msg_lower or 'my tasks' in msg_lower:
-            return self.get_status()
-
         # Default helpful response
         else:
             return self.smart_fallback(message)
@@ -312,7 +324,8 @@ What would you like help with?"""
                 trigger='date',
                 run_date=reminder_time,
                 args=[self.phone_number, task, self.user['assistant_name']],
-                id=job_id
+                id=job_id,
+                replace_existing=True
             )
             
             # Save to database
@@ -334,7 +347,7 @@ What would you like help with?"""
 
 I'll message you then! 
 
-💡 Tip: You can say "show my reminders" to see all pending reminders."""
+💡 Tip: Say "show my reminders" to see all pending reminders."""
         else:
             return """I need more details to set a reminder. Try:
 • "Remind me to call mom at 5 PM"
@@ -343,6 +356,166 @@ I'll message you then!
 
 What would you like me to remind you about?"""
     
+    def parse_reminder(self, text: str) -> Tuple[Optional[datetime], Optional[str]]:
+        """Parse reminder time and task from text"""
+        text_lower = text.lower()
+        now = datetime.now(self.timezone)
+        
+        # More robust time patterns
+        time_match = re.search(r'at\s+(\d{1,2})\s*(am|pm|AM|PM)', text)
+        relative_match = re.search(r'in\s+(\d+)\s*(hour|minute|min|hr)s?', text_lower)
+        
+        reminder_time = None
+        
+        # Check for relative time (e.g., "in 3 minutes")
+        if relative_match:
+            amount = int(relative_match.group(1))
+            unit = relative_match.group(2).lower()
+            
+            if 'hour' in unit or 'hr' in unit:
+                reminder_time = now + timedelta(hours=amount)
+            else:  # minutes
+                reminder_time = now + timedelta(minutes=amount)
+        
+        # Check for specific time (e.g., "at 5 PM")
+        elif time_match:
+            hour = int(time_match.group(1))
+            period = time_match.group(2).lower()
+            
+            if period == 'pm' and hour != 12:
+                hour += 12
+            elif period == 'am' and hour == 12:
+                hour = 0
+            
+            reminder_time = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+            
+            # Check for tomorrow
+            if 'tomorrow' in text_lower:
+                reminder_time += timedelta(days=1)
+            elif reminder_time <= now:
+                # If time has passed today, assume tomorrow
+                reminder_time += timedelta(days=1)
+        
+        # Extract task
+        if reminder_time:
+            # Remove common patterns to extract the actual task
+            task = text
+            
+            # Remove "remind me" variations
+            task = re.sub(r'\b(remind|me)\b', '', task, flags=re.IGNORECASE)
+            
+            # Remove the time pattern we found
+            if relative_match:
+                # For "in X minutes/hours to" pattern, keep the "to" part
+                pattern = relative_match.group(0)
+                if ' to ' in text_lower:
+                    task = task.replace(pattern + ' to', '')
+                else:
+                    task = task.replace(pattern, '')
+            
+            if time_match:
+                task = task.replace(time_match.group(0), '')
+                task = re.sub(r'\bat\b', '', task, flags=re.IGNORECASE)
+            
+            # Remove other time-related words
+            task = re.sub(r'\b(tomorrow|today)\b', '', task, flags=re.IGNORECASE)
+            
+            # Clean up
+            task = ' '.join(task.split()).strip()
+            
+            # Remove leading "to" if present
+            if task.startswith('to '):
+                task = task[3:]
+            
+            if not task:
+                task = "Reminder"
+            
+            return reminder_time, task
+        
+        return None, None
+    
+    def get_status(self) -> str:
+        """Get current status of tasks and goals"""
+        conn = sqlite3.connect('assistant.db')
+        c = conn.cursor()
+        
+        # Get pending reminders
+        c.execute("""SELECT task, reminder_time FROM reminders 
+                    WHERE phone_number = ? AND completed = 0 
+                    AND reminder_time > datetime('now')
+                    ORDER BY reminder_time LIMIT 5""",
+                 (self.phone_number,))
+        reminders = c.fetchall()
+        
+        # Get active goals
+        c.execute("""SELECT goal, created_at FROM goals 
+                    WHERE phone_number = ? AND completed = 0
+                    ORDER BY created_at DESC LIMIT 5""",
+                 (self.phone_number,))
+        goals = c.fetchall()
+        
+        conn.close()
+        
+        # More conversational response
+        if not reminders and not goals:
+            return """You're all clear! 🎉 
+
+No reminders or goals pending right now. 
+
+Want to:
+• Set a reminder? Say "Remind me to..."
+• Set a goal? Say "I want to..."
+• Get suggestions? Say "What should I do?"
+
+I'm here whenever you need me!"""
+        
+        response = "Here's what you've got going on:\n\n"
+        
+        if reminders:
+            response += "📌 **Your Reminders:**\n"
+            for task, time_str in reminders:
+                reminder_time = datetime.fromisoformat(time_str)
+                # Convert to user's timezone for display
+                reminder_time = reminder_time.replace(tzinfo=pytz.UTC).astimezone(self.timezone)
+                time_until = reminder_time - datetime.now(self.timezone)
+                
+                # Natural time descriptions
+                if time_until.days > 0:
+                    time_desc = f"in {time_until.days} day{'s' if time_until.days > 1 else ''}"
+                elif time_until.total_seconds() / 3600 > 1:
+                    hours = int(time_until.total_seconds() / 3600)
+                    time_desc = f"in {hours} hour{'s' if hours > 1 else ''}"
+                else:
+                    minutes = int(time_until.total_seconds() / 60)
+                    if minutes < 1:
+                        time_desc = "any moment now!"
+                    elif minutes == 1:
+                        time_desc = "in 1 minute"
+                    else:
+                        time_desc = f"in {minutes} minutes"
+                
+                response += f"• {task} ({time_desc})\n"
+        
+        if reminders and goals:
+            response += "\n"
+        
+        if goals:
+            response += "🎯 **Your Goals:**\n"
+            for goal, created in goals:
+                created_date = datetime.fromisoformat(created).date()
+                days_active = (datetime.now().date() - created_date).days
+                if days_active == 0:
+                    day_text = "Started today"
+                elif days_active == 1:
+                    day_text = "Day 2"
+                else:
+                    day_text = f"Day {days_active + 1}"
+                response += f"• {goal} ({day_text})\n"
+        
+        response += "\nLet me know if you complete anything! Just say 'done' 😊"
+        
+        return response
+    
     def handle_goal(self, message: str) -> str:
         """Handle goal setting with smart check-ins"""
         # Extract the goal
@@ -350,7 +523,10 @@ What would you like me to remind you about?"""
         
         # Clean up common prefixes
         for prefix in ['i want to', 'i need to', 'my goal is to', 'i have to', 'i must']:
-            goal_text = goal_text.lower().replace(prefix, '')
+            if prefix in goal_text.lower():
+                goal_text = goal_text.lower().replace(prefix, '', 1)
+                break
+        
         goal_text = goal_text.strip().capitalize()
         
         # Save goal
@@ -375,7 +551,8 @@ What would you like me to remind you about?"""
                 trigger='date',
                 run_date=check_time,
                 args=[self.phone_number, goal_text, self.user['assistant_name'], i+1],
-                id=job_id
+                id=job_id,
+                replace_existing=True
             )
         
         return f"""🎯 Goal set! I'll help you: {goal_text}
@@ -604,96 +781,96 @@ What would you like to focus on first?"""
         
         return response
     
-    def get_status(self) -> str:
-        """Get current status of tasks and goals"""
-        conn = sqlite3.connect('assistant.db')
-        c = conn.cursor()
-        
-        # Get pending reminders
-        c.execute("""SELECT task, reminder_time FROM reminders 
-                    WHERE phone_number = ? AND completed = 0 
-                    AND reminder_time > datetime('now')
-                    ORDER BY reminder_time LIMIT 5""",
-                 (self.phone_number,))
-        reminders = c.fetchall()
-        
-        # Get active goals
-        c.execute("""SELECT goal, created_at FROM goals 
-                    WHERE phone_number = ? AND completed = 0
-                    ORDER BY created_at DESC LIMIT 5""",
-                 (self.phone_number,))
-        goals = c.fetchall()
-        
-        conn.close()
-        
-        response = f"📊 **Your Current Status**\n\n"
-        
-        if reminders:
-            response += "⏰ **Upcoming Reminders:**\n"
-            for task, time_str in reminders:
-                reminder_time = datetime.fromisoformat(time_str)
-                time_until = reminder_time - datetime.now()
-                
-                if time_until.days > 0:
-                    time_desc = f"in {time_until.days} days"
-                elif time_until.total_seconds() / 3600 > 1:
-                    time_desc = f"in {int(time_until.total_seconds() / 3600)} hours"
-                else:
-                    time_desc = f"in {int(time_until.total_seconds() / 60)} minutes"
-                
-                response += f"• {task} ({time_desc})\n"
-        else:
-            response += "⏰ No pending reminders\n"
-        
-        response += "\n"
-        
-        if goals:
-            response += "🎯 **Active Goals:**\n"
-            for goal, created in goals:
-                created_date = datetime.fromisoformat(created).date()
-                days_active = (datetime.now().date() - created_date).days
-                response += f"• {goal} (Day {days_active + 1})\n"
-        else:
-            response += "🎯 No active goals\n"
-        
-        response += "\n💡 Reply 'done' when you complete something!"
-        
-        return response
-    
     def handle_completion(self, message: str) -> str:
         """Handle task/goal completion"""
-        # Get most recent active goal
+        msg_lower = message.lower()
+        
+        # Check for 'done' with a specific task mentioned
+        done_match = re.search(r'done(?:\s+with)?\s+(.+)', msg_lower)
+        
+        # Get recent reminders and goals
         conn = sqlite3.connect('assistant.db')
         c = conn.cursor()
         
+        # Get most recent reminder
+        c.execute("""SELECT id, task FROM reminders 
+                    WHERE phone_number = ? AND completed = 0
+                    ORDER BY reminder_time LIMIT 1""",
+                 (self.phone_number,))
+        recent_reminder = c.fetchone()
+        
+        # Get most recent goal
         c.execute("""SELECT id, goal FROM goals 
                     WHERE phone_number = ? AND completed = 0
                     ORDER BY created_at DESC LIMIT 1""",
                  (self.phone_number,))
         recent_goal = c.fetchone()
         
-        if recent_goal:
+        completed_something = False
+        completed_item = ""
+        
+        # If they specified what they completed
+        if done_match:
+            task_desc = done_match.group(1).strip()
+            # Try to match with reminders or goals
+            # For now, we'll just acknowledge what they said
+            completed_item = task_desc
+            completed_something = True
+        
+        # If just "done" and there's a recent reminder
+        elif recent_reminder and 'done' in msg_lower:
+            reminder_id, task = recent_reminder
+            c.execute("UPDATE reminders SET completed = 1 WHERE id = ?", (reminder_id,))
+            completed_item = task
+            completed_something = True
+        
+        # If it's about a goal
+        elif recent_goal and any(word in msg_lower for word in ['done', 'completed', 'finished']):
             goal_id, goal_text = recent_goal
             c.execute("UPDATE goals SET completed = 1 WHERE id = ?", (goal_id,))
-            conn.commit()
-            conn.close()
+            completed_item = goal_text
+            completed_something = True
+        
+        conn.commit()
+        conn.close()
+        
+        if completed_something:
+            congrats = [
+                "🎉 Awesome job!",
+                "🌟 Way to go!",
+                "💪 You did it!",
+                "🔥 Nice work!",
+                "✨ Fantastic!",
+                "🎊 Great job!",
+                "👏 Well done!"
+            ]
             
-            congrats = random.choice([
-                "🎉 Amazing work!",
-                "🌟 Fantastic job!",
-                "💪 You crushed it!",
-                "🔥 Excellent work!",
-                "✨ Well done!"
-            ])
+            motivations = [
+                "You're on fire today!",
+                "Keep up the great work!",
+                "You're crushing it!",
+                "That's how it's done!",
+                "You're making great progress!",
+                "Look at you go!",
+                "You're unstoppable!"
+            ]
             
-            return f"""{congrats} You completed: {goal_text}
-
-You're making great progress! What's next on your list?
-
-💡 Tip: Celebrating small wins builds momentum for bigger achievements!"""
+            if completed_item:
+                response = f"{random.choice(congrats)} You completed: {completed_item}\n\n{random.choice(motivations)}"
+            else:
+                response = f"{random.choice(congrats)} {random.choice(motivations)}"
+            
+            response += "\n\nWhat's next? 😊"
+            return response
         else:
-            conn.close()
-            return "Great job completing that! What did you finish? I'd love to celebrate with you! 🎉"
+            return """That's great! What did you complete? 
+
+You can say:
+• "Done" (marks your most recent task)
+• "Done with [task name]"
+• "Finished my goal"
+
+Or tell me what you accomplished and I'll celebrate with you! 🎉"""
     
     def smart_fallback(self, message: str) -> str:
         """Smart responses for unmatched patterns"""
@@ -710,6 +887,7 @@ You're making great progress! What's next on your list?
 🎯 Tracking goals
 🍳 Finding recipes
 ⏰ Time management
+✏️ You can also name me!
 
 For deeper questions, you might want to:
 • Google it for quick facts
@@ -746,72 +924,9 @@ I can definitely help with:
 🍳 Recipes - "Recipe for..."
 ⏰ Planning - "What should I do?"
 📊 Status - "Show my tasks"
+✏️ Name me - "I'll call you..."
 
 What would you like help with?"""
-    
-    def parse_reminder(self, text: str) -> Tuple[Optional[datetime], Optional[str]]:
-        """Parse reminder time and task from text"""
-        text_lower = text.lower()
-        now = datetime.now(self.timezone)
-        
-        # Time patterns
-        time_match = re.search(r'(\d{1,2})\s*(am|pm|AM|PM)', text)
-        relative_match = re.search(r'in\s+(\d+)\s*(hour|minute|min|hr)', text_lower)
-        
-        reminder_time = None
-        
-        # Check for relative time
-        if relative_match:
-            amount = int(relative_match.group(1))
-            unit = relative_match.group(2).lower()
-            
-            if 'hour' in unit:
-                reminder_time = now + timedelta(hours=amount)
-            else:  # minutes
-                reminder_time = now + timedelta(minutes=amount)
-        
-        # Check for specific time
-        elif time_match:
-            hour = int(time_match.group(1))
-            period = time_match.group(2).lower()
-            
-            if period == 'pm' and hour != 12:
-                hour += 12
-            elif period == 'am' and hour == 12:
-                hour = 0
-            
-            reminder_time = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-            
-            # Check for tomorrow
-            if 'tomorrow' in text_lower:
-                reminder_time += timedelta(days=1)
-            elif reminder_time <= now:
-                # If time has passed today, assume tomorrow
-                reminder_time += timedelta(days=1)
-        
-        # Extract task by removing time-related words
-        if reminder_time:
-            task = text
-            time_words = ['remind', 'me', 'to', 'at', 'in', 'tomorrow', 'am', 'pm', 
-                         'hour', 'hours', 'minute', 'minutes', 'min', 'hr']
-            
-            for word in time_words:
-                task = re.sub(r'\b' + word + r's?\b', '', task, flags=re.IGNORECASE)
-            
-            # Clean up numbers that are part of time
-            if time_match:
-                task = task.replace(time_match.group(0), '')
-            if relative_match:
-                task = task.replace(relative_match.group(0), '')
-            
-            task = ' '.join(task.split()).strip()
-            
-            if not task:
-                task = "Reminder"
-            
-            return reminder_time, task
-        
-        return None, None
     
     def update_assistant_name(self, new_name: str):
         """Update assistant name in database"""
@@ -863,7 +978,8 @@ What would you like help with?"""
                     trigger='date',
                     run_date=reminder_time,
                     args=[self.phone_number, task, self.user['assistant_name']],
-                    id=job_id
+                    id=job_id,
+                    replace_existing=True
                 )
         
         # Check for goal intent
@@ -887,47 +1003,75 @@ What would you like help with?"""
 # Helper functions for scheduled jobs
 def send_reminder(phone_number: str, task: str, assistant_name: str):
     """Send a reminder message"""
-    message = f"""🔔 **{assistant_name} Reminder**
-
-{task}
-
-Reply 'done' when completed or 'snooze' to delay 15 minutes."""
+    # Make it conversational with variety
+    intros = [
+        f"Hey! Just reminding you to {task} 😊",
+        f"Hi there! Time to {task}",
+        f"Hey, it's {assistant_name}! Don't forget to {task}",
+        f"Quick reminder: {task} 📌",
+        f"Heads up! You wanted me to remind you to {task}",
+        f"Hey friend! It's time to {task}",
+        f"Pssst... remember to {task}! ⏰"
+    ]
     
-    twilio_client.messages.create(
-        body=message,
-        from_=TWILIO_WHATSAPP_NUMBER,
-        to=phone_number
-    )
+    outros = [
+        "\n\nLet me know when you're done!",
+        "\n\nReply 'done' when you've finished!",
+        "\n\nYou've got this! 💪",
+        "\n\nHope this helps! Reply if you need anything.",
+        "\n\nGood luck! Let me know how it goes.",
+        "\n\nI'm here if you need help!"
+    ]
     
-    logger.info(f"Sent reminder to {phone_number}: {task}")
+    message = random.choice(intros) + random.choice(outros)
+    
+    try:
+        twilio_client.messages.create(
+            body=message,
+            from_=TWILIO_WHATSAPP_NUMBER,
+            to=phone_number
+        )
+        logger.info(f"Sent reminder to {phone_number}: {task}")
+    except Exception as e:
+        logger.error(f"Failed to send reminder: {e}")
 
 def send_goal_checkin(phone_number: str, goal: str, assistant_name: str, check_number: int):
     """Send a goal check-in message"""
-    messages = [
-        f"How's progress on: {goal}? Even small steps count! 💪",
-        f"Checking in on your goal: {goal}. How's it going? 🎯",
-        f"Time for a progress check! How are you doing with: {goal}? 🌟",
-        f"Quick check: Any updates on {goal}? You've got this! 🔥"
-    ]
+    # More casual and varied check-ins
+    check_ins = {
+        1: [
+            f"Hey! How's it going with your goal to {goal}? 😊",
+            f"Quick check - any progress on {goal}?",
+            f"Hi! Just wanted to see how {goal} is coming along!",
+            f"Hey there! Made any headway on {goal}?"
+        ],
+        2: [
+            f"Checking in again! How's {goal} going? Halfway there! 🎯",
+            f"Hey! Still working on {goal}? You're doing great!",
+            f"Mid-day check: how's the progress on {goal}?",
+            f"Hi! Hope {goal} is going well. Need any help?"
+        ],
+        3: [
+            f"Final check for today! How did {goal} go? 🌟",
+            f"Hey! Wrapping up the day - how far did you get with {goal}?",
+            f"Evening check-in: did you make progress on {goal}?",
+            f"Hi! How did it go with {goal} today?"
+        ]
+    }
     
-    message = f"""📊 **{assistant_name} Check-in #{check_number}**
-
-{random.choice(messages)}
-
-Reply with:
-• Your progress so far
-• 'done' if completed
-• 'help' if you're stuck
-
-Remember: Progress > Perfection! 🚀"""
+    messages = check_ins.get(check_number, check_ins[1])
     
-    twilio_client.messages.create(
-        body=message,
-        from_=TWILIO_WHATSAPP_NUMBER,
-        to=phone_number
-    )
+    message = random.choice(messages) + "\n\nNo pressure - just let me know how you're doing! 💪"
     
-    logger.info(f"Sent goal check-in to {phone_number} for: {goal}")
+    try:
+        twilio_client.messages.create(
+            body=message,
+            from_=TWILIO_WHATSAPP_NUMBER,
+            to=phone_number
+        )
+        logger.info(f"Sent goal check-in to {phone_number} for: {goal}")
+    except Exception as e:
+        logger.error(f"Failed to send goal check-in: {e}")
 
 # Morning briefing job
 def send_morning_briefings():
@@ -1074,12 +1218,14 @@ def home():
         <li>⏰ Time management suggestions</li>
         <li>🧠 AI-powered responses ({USE_AI and 'Enabled' or 'Disabled'})</li>
         <li>💬 Natural language understanding</li>
+        <li>✏️ Custom assistant naming</li>
     </ul>
     
     <h3>How to use:</h3>
     <ol>
         <li>Save the Twilio WhatsApp number</li>
         <li>Send "Hi" to get started</li>
+        <li>Name your assistant: "I'll call you Jarvis"</li>
         <li>The bot adapts to your timezone automatically</li>
     </ol>
     
