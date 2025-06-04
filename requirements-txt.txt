@@ -40,5 +40,5 @@ requests==2.31.0
 # Production server
 gevent==23.7.0
 
-
-openai# phonenumbers for timezone detection
+openai==0.28.1
+phonenumbers==8.13.20
