@@ -360,7 +360,7 @@ What would you like help with?"""
             conn.commit()
             conn.close()
             
-            time_str = reminder_time.strftime('%I:%M %p')
+            time_str = reminder_time.strftime('%I:%M %p').lstrip('0')
             date_str = "today" if reminder_time.date() == datetime.now(self.timezone).date() else reminder_time.strftime('%B %d')
             
             response = f"""✅ Reminder set!
@@ -371,7 +371,7 @@ What would you like help with?"""
 I'll message you then!"""
             
             # Check if this is an ongoing task that needs follow-ups
-            ongoing_keywords = ['essay', 'report', 'project', 'assignment', 'homework', 'study', 'work on', 'write', 'finish', 'complete']
+            ongoing_keywords = ['essay', 'report', 'project', 'assignment', 'homework', 'study', 'work on', 'write', 'finish', 'complete', 'class', 'exam', 'test']
             if any(keyword in task.lower() for keyword in ongoing_keywords):
                 response += f"""
 
@@ -385,95 +385,191 @@ Just say "yes" or "set it as a goal" and I'll help you stay accountable! 💪"""
             
             return response
         else:
-            return """I need more details to set a reminder. Try:
-• "Remind me to call mom at 5 PM"
-• "Remind me in 2 hours to take medicine"
-• "Remind me tomorrow at 9 AM to submit report"
+            # Try to be more helpful about what went wrong
+            msg_lower = message.lower()
+            
+            # Check if they included a time at all
+            has_time_words = any(word in msg_lower for word in ['at', 'in', 'by', 'tomorrow', 'tonight', 'morning', 'afternoon', 'evening'])
+            
+            if not has_time_words:
+                return """I didn't catch when you want to be reminded. Try including a time:
+
+✓ "Remind me in 30 minutes to call mom"
+✓ "Remind me at 5:30 PM to go to my economics class"
+✓ "Remind me tomorrow morning to submit the report"
+✓ "Remind me tonight at 8 to watch the game"
+
+When should I remind you?"""
+            else:
+                # They tried to include a time but we couldn't parse it
+                return """I'm having trouble understanding the time. Here are formats that work:
+
+✓ "Remind me to call John at 5:30 PM"
+✓ "Remind me to study in 2 hours"
+✓ "Remind me at noon to eat lunch"
+✓ "Remind me tomorrow at 9 AM to submit report"
+
+I can understand:
+• Specific times: "at 3:45 PM", "at 5PM", "by 6:30 PM"
+• Relative times: "in 20 minutes", "in 1 hour"
+• Natural times: "tomorrow morning", "tonight at 8"
 
 What would you like me to remind you about?"""
     
     def parse_reminder(self, text: str) -> Tuple[Optional[datetime], Optional[str]]:
-        """Parse reminder time and task from text"""
+        """Parse reminder time and task from text - handles natural language"""
         text_lower = text.lower()
         now = datetime.now(self.timezone)
         
-        # More robust time patterns
-        time_match = re.search(r'at\s+(\d{1,2})\s*(am|pm|AM|PM)', text)
-        relative_match = re.search(r'in\s+(\d+)\s*(hour|minute|min|hr)s?', text_lower)
+        # Remove "remind me" and variations to clean up the text
+        cleaned_text = text
+        for phrase in ['remind me', 'reminder', 'remind']:
+            cleaned_text = re.sub(rf'\b{phrase}\b', '', cleaned_text, flags=re.IGNORECASE)
+        cleaned_text = cleaned_text.strip()
+        
+        # If it starts with "to", remove it
+        if cleaned_text.startswith('to '):
+            cleaned_text = cleaned_text[3:]
         
         reminder_time = None
+        task = None
         
-        # Check for relative time (e.g., "in 3 minutes")
-        if relative_match:
-            amount = int(relative_match.group(1))
-            unit = relative_match.group(2).lower()
-            
-            if 'hour' in unit or 'hr' in unit:
-                reminder_time = now + timedelta(hours=amount)
-            else:  # minutes
-                reminder_time = now + timedelta(minutes=amount)
+        # Pattern 1: "in X minutes/hours"
+        relative_patterns = [
+            r'in\s+(\d+)\s*(minute|min|hour|hr)s?',
+            r'after\s+(\d+)\s*(minute|min|hour|hr)s?',
+            r'(\d+)\s*(minute|min|hour|hr)s?\s+from\s+now',
+        ]
         
-        # Check for specific time (e.g., "at 5 PM")
-        elif time_match:
-            hour = int(time_match.group(1))
-            period = time_match.group(2).lower()
-            
-            if period == 'pm' and hour != 12:
-                hour += 12
-            elif period == 'am' and hour == 12:
-                hour = 0
-            
-            reminder_time = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-            
-            # Check for tomorrow
-            if 'tomorrow' in text_lower:
-                reminder_time += timedelta(days=1)
-            elif reminder_time <= now:
-                # If time has passed today, assume tomorrow
-                reminder_time += timedelta(days=1)
-        
-        # Extract task
-        if reminder_time:
-            # Remove common patterns to extract the actual task
-            task = text
-            
-            # Remove "remind me" variations
-            task = re.sub(r'\b(remind|me)\b', '', task, flags=re.IGNORECASE)
-            
-            # Remove the time pattern we found
-            if relative_match:
-                # For "in X minutes/hours that" pattern, keep everything after "that"
-                if ' that ' in text_lower:
-                    that_index = text_lower.find(' that ')
-                    task = text[that_index + 6:]  # Skip " that "
+        for pattern in relative_patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                amount = int(match.group(1))
+                unit = match.group(2).lower()
+                
+                if 'hour' in unit or 'hr' in unit:
+                    reminder_time = now + timedelta(hours=amount)
                 else:
-                    task = task.replace(relative_match.group(0), '')
+                    reminder_time = now + timedelta(minutes=amount)
+                
+                # Extract task by removing the time part
+                task = cleaned_text
+                task = task.replace(match.group(0), '')
+                break
+        
+        # Pattern 2: Specific times with various formats
+        if not reminder_time:
+            time_patterns = [
+                # "at 5:30 PM", "at 5:30PM", "at 530 PM"
+                r'at\s+(\d{1,2}):?(\d{0,2})\s*(am|pm|AM|PM)',
+                # "by 5:30 PM"
+                r'by\s+(\d{1,2}):?(\d{0,2})\s*(am|pm|AM|PM)',
+                # "5:30 PM" anywhere in the text
+                r'(\d{1,2}):(\d{2})\s*(am|pm|AM|PM)',
+                # "5 PM" anywhere in the text
+                r'(\d{1,2})\s*(am|pm|AM|PM)',
+                # "tomorrow at 5 PM"
+                r'tomorrow\s+at\s+(\d{1,2}):?(\d{0,2})\s*(am|pm|AM|PM)',
+                # "tonight at 8"
+                r'tonight\s+at\s+(\d{1,2}):?(\d{0,2})',
+            ]
             
-            if time_match:
-                task = task.replace(time_match.group(0), '')
-                task = re.sub(r'\bat\b', '', task, flags=re.IGNORECASE)
+            for pattern in time_patterns:
+                match = re.search(pattern, text_lower)
+                if match:
+                    groups = match.groups()
+                    hour = int(groups[0])
+                    
+                    # Handle minutes if present
+                    if len(groups) > 2 and groups[1] and groups[1].isdigit():
+                        minute = int(groups[1])
+                    else:
+                        minute = 0
+                    
+                    # Handle AM/PM if present
+                    if len(groups) >= 3 and groups[-1] and groups[-1].lower() in ['am', 'pm']:
+                        period = groups[-1].lower()
+                        if period == 'pm' and hour != 12:
+                            hour += 12
+                        elif period == 'am' and hour == 12:
+                            hour = 0
+                    elif 'tonight' in text_lower and hour < 12:
+                        hour += 12  # Assume PM for "tonight"
+                    
+                    try:
+                        reminder_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        
+                        # Handle relative days
+                        if 'tomorrow' in text_lower:
+                            reminder_time += timedelta(days=1)
+                        elif 'tonight' in text_lower and reminder_time <= now:
+                            # If "tonight" but time has passed, assume tomorrow
+                            reminder_time += timedelta(days=1)
+                        elif reminder_time <= now:
+                            # If time has passed today, assume tomorrow
+                            reminder_time += timedelta(days=1)
+                        
+                        # Extract task
+                        task = cleaned_text
+                        # Remove the time pattern and surrounding words
+                        time_phrase = match.group(0)
+                        # Also remove "at", "by", "around" before the time
+                        task = re.sub(rf'(at|by|around)?\s*{re.escape(time_phrase)}', '', task, flags=re.IGNORECASE)
+                        task = re.sub(r'\btomorrow\b', '', task, flags=re.IGNORECASE)
+                        task = re.sub(r'\btonight\b', '', task, flags=re.IGNORECASE)
+                        break
+                    except ValueError:
+                        continue
+        
+        # Pattern 3: Relative times like "in the morning", "this afternoon"
+        if not reminder_time:
+            relative_times = {
+                'morning': (9, 0),
+                'afternoon': (14, 0),
+                'evening': (18, 0),
+                'night': (21, 0),
+                'noon': (12, 0),
+                'midnight': (0, 0)
+            }
             
-            # Remove other time-related words
-            task = re.sub(r'\b(tomorrow|today|to)\b', '', task, flags=re.IGNORECASE)
-            
-            # Clean up
+            for time_name, (hour, minute) in relative_times.items():
+                if time_name in text_lower:
+                    reminder_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    if reminder_time <= now:
+                        reminder_time += timedelta(days=1)
+                    
+                    # Extract task
+                    task = cleaned_text
+                    task = re.sub(rf'(in\s+the\s+)?{time_name}', '', task, flags=re.IGNORECASE)
+                    task = re.sub(r'\b(this|tomorrow)\b', '', task, flags=re.IGNORECASE)
+                    break
+        
+        # Pattern 4: Handle "to [task] at/in [time]" format
+        if reminder_time and task:
+            # Clean up the task
             task = ' '.join(task.split()).strip()
             
-            # Fix pronouns - convert "I" to "you" and "my" to "your"
-            task = re.sub(r'\bI\b', 'you', task)
+            # Remove common filler words at the start
+            for word in ['to', 'that', 'about', 'for']:
+                if task.startswith(f'{word} '):
+                    task = task[len(word)+1:]
+            
+            # Fix pronouns
+            task = re.sub(r'\bi\b', 'you', task, flags=re.IGNORECASE)
             task = re.sub(r'\bmy\b', 'your', task, flags=re.IGNORECASE)
             task = re.sub(r'\bme\b', 'you', task, flags=re.IGNORECASE)
+            task = re.sub(r"\bi'm\b", "you're", task, flags=re.IGNORECASE)
+            task = re.sub(r"\bi've\b", "you've", task, flags=re.IGNORECASE)
             
-            # Ensure first letter is lowercase unless it's a proper noun
-            if task and not task[0].isupper() or task.startswith('You'):
+            # Ensure task starts with lowercase unless it's a proper noun
+            if task and not any(word[0].isupper() for word in task.split() if word not in ['i', "i'm", "i've"]):
                 task = task[0].lower() + task[1:] if len(task) > 1 else task.lower()
             
-            if not task:
+            # If task is empty or too short, use the full cleaned text
+            if not task or len(task) < 3:
                 task = "your reminder"
-            
-            return reminder_time, task
         
-        return None, None
+        return reminder_time, task
     
     def get_status(self) -> str:
         """Get current status of tasks and goals"""
